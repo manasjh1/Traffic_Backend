@@ -1,24 +1,29 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import os
+from dotenv import load_dotenv
+from database.db import engine, Base
 from api.auth import router as auth_router
 
-app = FastAPI(
-    title="Traffic System Auth API",
-    version="1.0.0"
-)
+load_dotenv()
 
-# CORS Configuration
+# Create tables on startup
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Traffic Management API", version="1.0.0")
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Register Routes
+# Routes
 app.include_router(auth_router, prefix="/api")
 
 @app.get("/")
 def root():
-    return {"status": "online", "message": "Auth System Running"}
+    return {"status": "online", "message": "Traffic Management API"}

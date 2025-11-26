@@ -6,28 +6,29 @@ load_dotenv()
 
 resend.api_key = os.getenv("RESEND_API_KEY")
 
-def send_otp_email(email: str, otp: str):
-    """
-    Sends an OTP email to the admin using Resend.
-    """
+def send_otp_email(email: str, otp: str) -> bool:
+    """Send OTP email to admin"""
     try:
         html_content = f"""
-        <div style="font-family: sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 8px;">
-            <h2>Admin Login Verification</h2>
-            <p>Your One-Time Password (OTP) is:</p>
-            <h1 style="color: #007bff; letter-spacing: 5px;">{otp}</h1>
-            <p>This code expires in 5 minutes.</p>
+        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px;">
+            <h2 style="color: #333;">Traffic Management Login</h2>
+            <p>Your login code:</p>
+            <h1 style="background: #f4f4f4; padding: 20px; text-align: center; letter-spacing: 5px; font-family: monospace;">
+                {otp}
+            </h1>
+            <p style="color: #666;">This code expires in 5 minutes.</p>
         </div>
         """
 
-        params = {
-            "from": "onboarding@resend.dev", # Update if you have a verified domain
+        response = resend.Emails.send({
+            "from": "Traffic System <onboarding@resend.dev>",
             "to": [email],
-            "subject": "Your Login OTP",
+            "subject": "Your Login Code",
             "html": html_content
-        }
-
-        email_resp = resend.Emails.send(params)
-        return email_resp
-    except Exception:
-        return None
+        })
+        
+        return True
+        
+    except Exception as e:
+        print(f"Email failed: {e}")
+        return False
