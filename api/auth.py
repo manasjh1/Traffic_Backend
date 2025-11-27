@@ -1,140 +1,98 @@
-from fastapi import APIRouter, HTTPException, status, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
-import random
-import string
-import os
+from passlib.context import CryptContext
+from jose import jwt
 from datetime import datetime, timedelta, timezone
-from jose import jwt, JWTError
+import os
 from database.db import get_db
-from database.models import Admin, OTPCode
-from utils.email_sender import send_otp_email
+from database.models import Admin
 
 router = APIRouter()
 
-# Configuration
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+# 1. SECURITY CONFIGURATION
+# We use Argon2 because it is newer and doesn't crash like bcrypt
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+
+# Secret key for signing JWT tokens (keep this safe!)
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-key-change-this")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
-# Security
-security = HTTPBearer()
+# 2. DATA MODELS
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    full_name: str | None = None
+    password: str
 
 class LoginRequest(BaseModel):
     email: EmailStr
+    password: str
 
-class VerifyOTPRequest(BaseModel):
-    email: EmailStr
-    otp: str
-
-def generate_otp(length: int = 6) -> str:
-    return ''.join(random.choices(string.digits, k=length))
-
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-@router.post("/auth/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    # Check if admin exists and is active
-    admin = db.query(Admin).filter(
-        Admin.email == request.email,
-        Admin.is_active == True
-    ).first()
+# 3. REGISTER API (Creates the user)
+@router.post("/auth/register")
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    # Check if user already exists
+    if db.query(Admin).filter(Admin.email == req.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
     
-    if not admin:
-        raise HTTPException(status_code=404, detail="Admin not found")
+    # Hash the password using Argon2
+    hashed_password = pwd_context.hash(req.password)
     
-    # Generate OTP
-    otp = generate_otp()
-    
-    # Save OTP with 5 minute expiry
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-    otp_record = OTPCode(
-        admin_id=admin.id,
-        email=request.email,
-        otp_code=otp,
-        expires_at=expires_at
+    new_admin = Admin(
+        email=req.email,
+        full_name=req.full_name,
+        password_hash=hashed_password,
+        role="admin"
     )
     
-    db.add(otp_record)
+    db.add(new_admin)
     db.commit()
-    
-    # Send OTP email
-    if not send_otp_email(request.email, otp):
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to send email")
-    
-    return {"message": "OTP sent successfully"}
+    return {"message": "Admin registered successfully. You can now login."}
 
-@router.post("/auth/verify")
-def verify(request: VerifyOTPRequest, db: Session = Depends(get_db)):
-    # Get latest OTP
-    otp_record = db.query(OTPCode).filter(
-        OTPCode.email == request.email
-    ).order_by(OTPCode.created_at.desc()).first()
+# In Traffic_Backend/api/auth.py
+
+@router.post("/auth/login")
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    print(f"\n--- LOGIN ATTEMPT ---")
+    print(f"1. Received email: '{req.email}'")
+    print(f"2. Received password: '{req.password}'")
+
+    # Find the user
+    admin = db.query(Admin).filter(Admin.email == req.email).first()
     
-    if not otp_record:
-        raise HTTPException(status_code=400, detail="No OTP found")
+    if not admin:
+        print("3. RESULT: User NOT found in database.")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    # Check OTP code
-    if otp_record.otp_code != request.otp:
-        raise HTTPException(status_code=401, detail="Invalid OTP")
+    print(f"3. User found: {admin.email}")
+    print(f"4. Stored Hash in DB: {admin.password_hash[:15]}...") # Print first 15 chars
     
-    # Check expiry
-    if datetime.now(timezone.utc) > otp_record.expires_at:
-        raise HTTPException(status_code=401, detail="OTP expired")
+    # Verify password
+    is_valid = pwd_context.verify(req.password, admin.password_hash)
+    print(f"5. Password Verification Result: {is_valid}")
+
+    if not is_valid:
+        print("6. RESULT: Password verification FAILED.")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    # Get admin
-    admin = db.query(Admin).filter(Admin.id == otp_record.admin_id).first()
+    print("6. RESULT: Success!")
     
-    # Update last login
-    admin.last_login = datetime.now(timezone.utc)
-    db.commit()
-    
-    # Delete used OTP
-    db.delete(otp_record)
-    db.commit()
-    
-    # Create JWT token
+    # Create JWT Token payload
     token_data = {
         "sub": admin.id,
         "email": admin.email,
-        "role": admin.role
+        "role": admin.role,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     }
     
-    token = create_access_token(token_data)
+    token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
     
     return {
         "access_token": token,
         "token_type": "bearer",
         "user": {
             "email": admin.email,
-            "role": admin.role,
             "full_name": admin.full_name
         }
     }
-
-@router.get("/auth/me")
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        admin_id = payload.get("sub")
-        
-        admin = db.query(Admin).filter(Admin.id == admin_id).first()
-        if not admin:
-            raise HTTPException(status_code=404, detail="Admin not found")
-        
-        return {
-            "id": admin.id,
-            "email": admin.email,
-            "full_name": admin.full_name,
-            "role": admin.role
-        }
-        
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
